@@ -1,45 +1,57 @@
 import io
-import json
 import os
 import sys
 import time
-from pathlib import Path
-
+import json
 import httplib2
 import pandas as pd
 import requests
 from PIL import Image
 from loguru import logger
+import glob
 
 bu = None
 rooms = []
 rdiff_groups = []
+name_file_min_vitrina = None
+name_file_stock = None
 
 
-def file_name() -> list:
+def file_name():
     """нахождение файла с 6.1
     :return имена файлов"""
-    file_exsel = sorted(Path('').glob('*.xlsx'))
-    if len(file_exsel) == 0:
+    global name_file_min_vitrina
+    global name_file_stock
+    files = ['Результат сверки стока.xlsx', 'Положительные RDiff(0 на V_Sales).xlsx',
+             'Минусовые RDiff, которые нужно проверить.xlsx']
+    files_exsel = glob.glob('*.xlsx')
+    try:
+        files_ending = [i for i in files_exsel if i not in files]
+    except Exception as ex:
+        logger.error(ex)
+    try:
+        files_min_vitrina = glob.glob('Мин.витрина/*.xlsx')
+        name_file_min_vitrina = [i for i in files_min_vitrina if i not in ['Мин.витрина\Мин по группам.xlsx']][0]
+    except Exception as ex:
+        logger.error(ex)
+    if len(files_ending) == 0:
         logger.error('Нет файлов с 6.1')
         exit_error()
-    elif len(file_exsel) > 1 and 'Результат сверки стока.xlsx' not in [str(i) for i in file_exsel] \
-            and 'Положительные RDiff(0 на V_Sales).xlsx' not in [str(i) for i in file_exsel] \
-            and 'Минусовые RDiff, которые нужно проверить.xlsx' \
-            not in [str(i) for i in file_exsel]:
+    elif len(files_ending) > 1:
         logger.error('Удалите лишние файлы с расширением .xlsx\n'
                      'Вожможно файл открыт')
         exit_error()
-    return file_exsel
+    else:
+        name_file_stock = [i for i in files_ending if i != name_file_min_vitrina][0]
 
 
-def read_file(files: list):
+def read_file():
     print('Чтение файла с остатками...')
     try:
         global bu
         global rooms
         global rdiff_groups
-        df = pd.read_excel(files[0], skiprows=14)
+        df = pd.read_excel(name_file_stock, skiprows=14)
         df.drop(["Поставщик", "Наименование"], axis=1, inplace=True)
         bu = list(df['БЮ'].unique())[0]
         rdiff_groups = sorted(list(df[(df.Склад == 'RDiff_{}'.format(bu))]['ТГ'].unique()))
@@ -48,20 +60,23 @@ def read_file(files: list):
             if i.startswith(('A', 'a')):
                 rooms.append(i)
     except Exception as ex:
-        logger.error('Ошибка при чтении файла c 6.1 {}\n{}'.format(files[0], ex))
+        logger.error('Ошибка при чтении файла c 6.1 {}\n{}'.format(name_file_stock, ex))
         exit_error()
 
     groups_tdd = [
         11, 12, 22, 23, 24, 25, 26, 27, 28, 29,
         '11', '12', '22', '23', '24', '25', '26', '27', '28', '29'
     ]
+    ignored_groups = ['112', '174', '175', '176', '177']
+
     sklad_tdd = df[((df.Склад == '011_{}'.format(bu)) |
-                    (df.Склад == '012_{}'.format(bu)) &
-                    ((df.Склад != '012_{}-OX'.format(bu))) &
-                    (df.НГ != '112')) &
+                    (df.Склад == '012_{}'.format(bu))) &
+                   (df.Склад != '012_{}-OX'.format(bu)) &
+                   ~(df.НГ.isin(ignored_groups)) &
                    (df.Доступно > 0) &
                    (df.ТГ.isin(groups_tdd))
                    ]
+
     sklad_art_list_tdd = list(sklad_tdd['Код \nноменклатуры'].unique())
     df_tdd = df[((df.Склад == 'V_{}'.format(bu)) |
                  (df.Склад == 'S_{}'.format(bu))) &
@@ -120,6 +135,93 @@ def read_file(files: list):
           '\n--------------------------------------------'.
           format(len(none_tdd), len(none_mebel), len(reserved_tdd), len(units_tdd_df)))
 
+    if name_file_min_vitrina:
+        try:
+            print('Сканирование мин.витрины...')
+            df_min = pd.read_excel(name_file_min_vitrina, skiprows=2, usecols=['SG', 'good_cod', 'Show_Med']).fillna(0)
+            df_min['good_cod'] = df_min['good_cod'].astype('int64')
+
+            daily_sales = sklad_tdd.groupby([pd.Grouper(key='Код \nноменклатуры')]).agg(
+                Количество_склад=('Доступно', 'sum')).reset_index()
+
+            df_tdd_min = df[(df.Склад == 'V_{}'.format(bu)) &
+                            (df.Доступно > 0) &
+                            (df.ТГ.isin(groups_tdd))
+                            ]
+            df_min_vitrina = pd.merge(df_tdd_min, df_min, left_on='Код \nноменклатуры', right_on='good_cod')
+            df_min_vitrina = pd.merge(df_min_vitrina, daily_sales, left_on='Код \nноменклатуры',
+                                      right_on='Код \nноменклатуры')
+            df_min_vitrina = df_min_vitrina.assign(Разница=df_min_vitrina['Доступно'] - df_min_vitrina['Show_Med'])
+            df_min_vitrina = df_min_vitrina[(df_min_vitrina['Разница'] < 0)]
+            df_min_vitrina.drop(
+                ["Reason code", "Физические \nзапасы", "Продано", "Зарезерви\nровано", "SG", "good_cod"], axis=1,
+                inplace=True)
+
+            dir = 'Файлы для импорта'
+            try:
+                for f in os.listdir(dir):
+                    os.remove(os.path.join(dir, f))
+            except:
+                pass
+
+            writer = pd.ExcelWriter('Мин.витрина\Мин по группам.xlsx', engine='xlsxwriter')
+            for group in groups_tdd:
+                try:
+                    temp_df = df_min_vitrina[(df_min_vitrina.ТГ == group)]
+                    if len(temp_df) != 0:
+                        data = {
+                            'Номенклатура': [],
+                            'Описание товара': [],
+                            'ТГ': [],
+                            'НГ': [],
+                            'Кол - во': [],
+                            'С \nячейки': [],
+                        }
+
+                        temp_df.sort_values(by='Код \nноменклатуры'). \
+                            to_excel(writer, sheet_name='Ед. ТГ {}'.format(group), index=False, na_rep='')
+                        worksheet = writer.sheets['Ед. ТГ {}'.format(group)]
+                        set_column(temp_df, worksheet)
+
+                        temp_dict = (temp_df
+                                     .groupby("Код \nноменклатуры")
+                                     .apply(lambda x: x.drop(columns="Код \nноменклатуры").to_dict("records"))
+                                     .to_dict())
+                        for key, value in temp_dict.items():
+                            art_df_sklad = sklad_tdd[(sklad_tdd['Код \nноменклатуры'] == int(key))]
+                            for i, row in art_df_sklad.iterrows():
+                                if value[0]['Разница'] < 0:
+                                    data['Номенклатура'].append(row['Код \nноменклатуры'])
+                                    data['С \nячейки'].append(row['Местоположение'])
+                                    data['Описание товара'].append(row['Описание товара'])
+                                    data['ТГ'].append(row['ТГ'])
+                                    data['НГ'].append(row['НГ'])
+                                    if row['Доступно'] < -(value[0]['Разница']):
+                                        data['Кол - во'].append(row['Доступно'])
+                                        value[0]['Разница'] += row['Доступно']
+                                    else:
+                                        data['Кол - во'].append(-(value[0]['Разница']))
+                                        break
+                        temp_df_pst = pd.DataFrame(data=data)
+                        temp_df_pst.insert(6, "Со \nСклада", '012_825')
+                        temp_df_pst.insert(7, "БЮ", '825')
+                        temp_df_pst.insert(8, "На \nсклад", 'V_825')
+                        temp_df_pst.insert(9, "В \nЯчейку", 'V_Sales')
+                        temp_df_pst['Со \nСклада'] = temp_df_pst['Со \nСклада'].astype('string')
+                        temp_df_pst_n = temp_df_pst.convert_dtypes()
+
+                        writer_pst = pd.ExcelWriter(f'Файлы для импорта/Пст ТГ.{group}.xlsx', engine='xlsxwriter')
+                        temp_df_pst_n.to_excel(writer_pst, sheet_name='ТГ {}'.format(group), index=False, na_rep='')
+                        worksheet = writer_pst.sheets['ТГ {}'.format(group)]
+                        set_column_pst(temp_df, worksheet)
+                        writer_pst.close()
+
+                except Exception as ex:
+                    logger.error(ex)
+            writer.close()
+        except Exception as ex:
+            logger.error('Ошибка записи результата мин.витрина{}'.format(ex))
+
     # if len(reserved_tdd) != 0:
     #     for num, row in enumerate(reserved_tdd.values):
     #         try:
@@ -155,110 +257,9 @@ def read_file(files: list):
     write_exsel(df, none_all, new_df_tdd, new_df_mebel, reserved_tdd, units_tdd_df)
 
 
-def write_to_excel_rdiff(files):
-    print('Проверка RDiff...')
-    try:
-        df = pd.read_excel(files[0], skiprows=14)
-        df.drop(["Поставщик", "Наименование"], axis=1, inplace=True)
-    except Exception as ex:
-        logger.error('Ошибка при чтении файла c 6.1 {}\n{}'.format(files[0], ex))
-        exit_error()
-
-    writer = pd.ExcelWriter('Положительные RDiff(0 на V_Sales).xlsx', engine='xlsxwriter',
-                            engine_kwargs={'options': {'strings_to_numbers': True}})
-    workbook = writer.book
-    cell_format = workbook.add_format({'align': 'left', 'valign': 'top', 'font_size': 12})
-
-    for i in rdiff_groups:
-        try:
-            print('Сканируются плюсовые RDiff ТГ {}'.format(i))
-            temp = df[
-                (df.ТГ == i) &
-                (df.Склад == 'RDiff_{}'.format(bu)) &
-                (df.Доступно > 0)
-                ]
-            temp_art_list = sorted(list(temp['Код \nноменклатуры'].unique()))
-            temp = pd.DataFrame()
-            for art in temp_art_list:
-                try:
-                    rdiff_art_vls = df[(df.Склад == 'V_{}'.format(bu))
-                                       & (df['Код \nноменклатуры'] == art)
-                                       & (df.Доступно > 0)]
-                    if len(rdiff_art_vls) == 0:
-                        temp = pd.concat([temp, df.loc[(df['Код \nноменклатуры'] == art)]])
-                except Exception as ex:
-                    print(art, ex)
-            new_df = temp
-
-            if len(new_df) > 0:
-                try:
-                    new_df.sort_values(by='Код \nноменклатуры', ascending=False). \
-                        to_excel(writer, sheet_name='ТГ {}'.format(i), index=False, na_rep='')
-                    worksheet = writer.sheets['ТГ {}'.format(i)]
-                    set_column(df, worksheet, cell_format=cell_format)
-                except Exception as ex:
-                    print(ex)
-        except Exception as ex:
-            print(ex)
-    writer.close()
-
-
-def write_to_excel_minus_rdiff(files):
-    try:
-        df = pd.read_excel(files[0], skiprows=14)
-        df.drop(["Поставщик", "Наименование"], axis=1, inplace=True)
-    except Exception as ex:
-        logger.error('Ошибка при чтении файла c 6.1 {}\n{}'.format(files[0], ex))
-        exit_error()
-
-    writer = pd.ExcelWriter('Минусовые RDiff, которые нужно проверить.xlsx', engine='xlsxwriter',
-                            engine_kwargs={'options': {'strings_to_numbers': True}})
-    workbook = writer.book
-    cell_format = workbook.add_format({'align': 'left', 'valign': 'top', 'font_size': 12})
-    for i in rdiff_groups:
-        print('Сканируются минусовые RDiff ТГ {}'.format(i))
-        try:
-            group_rdiff_art = df[
-                (df.ТГ == i) &
-                (df.Склад == 'RDiff_{}'.format(bu)) &
-                (df.Доступно < 0)
-                ]
-
-            list_minus = list(group_rdiff_art['Код \nноменклатуры'].unique())
-            temp = pd.DataFrame()
-            for art in list_minus:
-                try:
-                    temp = pd.concat([temp, df.loc[df['Код \nноменклатуры'] == art]])
-                except Exception as ex:
-                    print(art, ex)
-            new_df = temp
-            if len(new_df) > 0:
-                try:
-                    new_df.sort_values(by='Код \nноменклатуры', ascending=False). \
-                        to_excel(writer, sheet_name='ТГ {}'.format(i), index=False, na_rep='')
-                    worksheet = writer.sheets['ТГ {}'.format(i)]
-                    set_column(df, worksheet, cell_format=cell_format)
-                except Exception as ex:
-                    print(ex)
-        except Exception as ex:
-            print(ex)
-    writer.close()
-
-
-def set_to_df(art_set, df_sklad):
-    new_df = pd.DataFrame()
-    for art in art_set:
-        try:
-            new_df = pd.concat([new_df, df_sklad.loc[(df_sklad['Код \nноменклатуры'] == art)]])
-        except Exception as ex:
-            print(art, ex)
-    return new_df
-
-
 def write_exsel(df, none_all, new_df_tdd, new_df_mebel, reserved_tdd, units_tdd_df):
     try:
-        writer = pd.ExcelWriter('Результат сверки стока.xlsx', engine='xlsxwriter',
-                                engine_kwargs={'options': {'strings_to_numbers': True}})
+        writer = pd.ExcelWriter('Результат сверки стока.xlsx', engine='xlsxwriter')
         workbook = writer.book
         cell_format = workbook.add_format({'align': 'left', 'valign': 'top', 'font_size': 12})
 
@@ -314,6 +315,105 @@ def write_exsel(df, none_all, new_df_tdd, new_df_mebel, reserved_tdd, units_tdd_
         exit_error()
 
 
+def write_to_excel_rdiff():
+    print('Проверка RDiff...')
+    try:
+        df = pd.read_excel(name_file_stock, skiprows=14)
+        df.drop(["Поставщик", "Наименование"], axis=1, inplace=True)
+    except Exception as ex:
+        logger.error('Ошибка при чтении файла c 6.1 {}\n{}'.format(name_file_stock, ex))
+        exit_error()
+
+    writer = pd.ExcelWriter('Положительные RDiff(0 на V_Sales).xlsx', engine='xlsxwriter',
+                            engine_kwargs={'options': {'strings_to_numbers': True}})
+    workbook = writer.book
+    cell_format = workbook.add_format({'align': 'left', 'valign': 'top', 'font_size': 12})
+
+    for i in rdiff_groups:
+        try:
+            print('Сканируются плюсовые RDiff ТГ {}'.format(i))
+            temp = df[
+                (df.ТГ == i) &
+                (df.Склад == 'RDiff_{}'.format(bu)) &
+                (df.Доступно > 0)
+                ]
+            temp_art_list = sorted(list(temp['Код \nноменклатуры'].unique()))
+            temp = pd.DataFrame()
+            for art in temp_art_list:
+                try:
+                    rdiff_art_vls = df[(df.Склад == 'V_{}'.format(bu))
+                                       & (df['Код \nноменклатуры'] == art)
+                                       & (df.Доступно > 0)]
+                    if len(rdiff_art_vls) == 0:
+                        temp = pd.concat([temp, df.loc[(df['Код \nноменклатуры'] == art)]])
+                except Exception as ex:
+                    print(art, ex)
+            new_df = temp
+
+            if len(new_df) > 0:
+                try:
+                    new_df.sort_values(by='Код \nноменклатуры', ascending=False). \
+                        to_excel(writer, sheet_name='ТГ {}'.format(i), index=False, na_rep='')
+                    worksheet = writer.sheets['ТГ {}'.format(i)]
+                    set_column(df, worksheet, cell_format=cell_format)
+                except Exception as ex:
+                    print(ex)
+        except Exception as ex:
+            print(ex)
+    writer.close()
+
+
+def write_to_excel_minus_rdiff():
+    try:
+        df = pd.read_excel(name_file_stock, skiprows=14)
+        df.drop(["Поставщик", "Наименование"], axis=1, inplace=True)
+    except Exception as ex:
+        logger.error('Ошибка при чтении файла c 6.1 {}\n{}'.format(name_file_stock, ex))
+        exit_error()
+
+    writer = pd.ExcelWriter('Минусовые RDiff, которые нужно проверить.xlsx', engine='xlsxwriter')
+    workbook = writer.book
+    cell_format = workbook.add_format({'align': 'left', 'valign': 'top', 'font_size': 12})
+    for i in rdiff_groups:
+        print('Сканируются минусовые RDiff ТГ {}'.format(i))
+        try:
+            group_rdiff_art = df[
+                (df.ТГ == i) &
+                (df.Склад == 'RDiff_{}'.format(bu)) &
+                (df.Доступно < 0)
+                ]
+
+            list_minus = list(group_rdiff_art['Код \nноменклатуры'].unique())
+            temp = pd.DataFrame()
+            for art in list_minus:
+                try:
+                    temp = pd.concat([temp, df.loc[df['Код \nноменклатуры'] == art]])
+                except Exception as ex:
+                    print(art, ex)
+            new_df = temp
+            if len(new_df) > 0:
+                try:
+                    new_df.sort_values(by='Код \nноменклатуры', ascending=False). \
+                        to_excel(writer, sheet_name='ТГ {}'.format(i), index=False, na_rep='')
+                    worksheet = writer.sheets['ТГ {}'.format(i)]
+                    set_column(df, worksheet, cell_format=cell_format)
+                except Exception as ex:
+                    print(ex)
+        except Exception as ex:
+            print(ex)
+    writer.close()
+
+
+def set_to_df(art_set, df_sklad):
+    new_df = pd.DataFrame()
+    for art in art_set:
+        try:
+            new_df = pd.concat([new_df, df_sklad.loc[(df_sklad['Код \nноменклатуры'] == art)]])
+        except Exception as ex:
+            print(art, ex)
+    return new_df
+
+
 def set_column(df, worksheet, cell_format=None):
     (max_row, max_col) = df.shape
     worksheet.autofilter(0, 0, max_row, max_col - 1)
@@ -327,6 +427,16 @@ def set_column(df, worksheet, cell_format=None):
     worksheet.set_column('K:K', 14, cell_format)
     worksheet.set_column('L:L', 17, cell_format)
     worksheet.set_column('M:W', 14, cell_format)
+
+
+def set_column_pst(df, worksheet, cell_format=None):
+    (max_row, max_col) = df.shape
+    worksheet.autofilter(0, 0, max_row, max_col - 1)
+    worksheet.set_column('A:A', 17, cell_format)
+    worksheet.set_column('B:B', 50, cell_format)
+    worksheet.set_column('C:E', 12, cell_format)
+    worksheet.set_column('F:F', 22, cell_format)
+    worksheet.set_column('D:W', 16, cell_format)
 
 
 def insert_images(worksheet, num, cell_format, image):
@@ -345,7 +455,7 @@ def insert_images(worksheet, num, cell_format, image):
 
 def exit_error():
     """выход из консоли"""
-    time.sleep(5)
+    time.sleep(2)
     exit()
 
 
@@ -409,8 +519,9 @@ def parse(art):
 
 if __name__ == "__main__":
     logger.add(sys.stderr, format="{time} {level} {message}", filter="my_module")
-    read_file(file_name())
-    write_to_excel_rdiff(file_name())
-    write_to_excel_minus_rdiff(file_name())
+    file_name()
+    read_file()
+    # write_to_excel_rdiff()
+    # write_to_excel_minus_rdiff()
     print('Завершено!')
     exit_error()
