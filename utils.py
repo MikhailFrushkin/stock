@@ -2,7 +2,6 @@ import os
 
 import pandas as pd
 from PyQt5.QtWidgets import QMessageBox
-from loguru import logger
 
 
 def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
@@ -83,8 +82,8 @@ def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
 
     if min_vitrina:
         try:
-            df_min = pd.read_excel(name_file_min_vitrina, skiprows=2, usecols=['SG', 'good_cod', 'Show_Med']).fillna(0)
-            df_min['good_cod'] = df_min['good_cod'].astype('int64')
+            df_min = pd.read_excel(name_file_min_vitrina).fillna(0)
+            df_min['Артикул'] = df_min['Артикул'].astype('int64')
 
             daily_sales = sklad_tdd.groupby([pd.Grouper(key='Код \nноменклатуры')]).agg(
                 Количество_склад=('Доступно', 'sum')).reset_index()
@@ -93,13 +92,13 @@ def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
                             (df.Доступно > 0) &
                             (df.ТГ.isin(groups_tdd))
                             ]
-            df_min_vitrina = pd.merge(df_tdd_min, df_min, left_on='Код \nноменклатуры', right_on='good_cod')
+            df_min_vitrina = pd.merge(df_tdd_min, df_min, left_on='Код \nноменклатуры', right_on='Артикул')
             df_min_vitrina = pd.merge(df_min_vitrina, daily_sales, left_on='Код \nноменклатуры',
                                       right_on='Код \nноменклатуры')
-            df_min_vitrina = df_min_vitrina.assign(Разница=df_min_vitrina['Доступно'] - df_min_vitrina['Show_Med'])
+            df_min_vitrina = df_min_vitrina.assign(Разница=df_min_vitrina['Доступно'] - df_min_vitrina['Количество мин'])
             df_min_vitrina = df_min_vitrina[(df_min_vitrina['Разница'] < 0)]
             df_min_vitrina.drop(
-                ["Reason code", "Физические \nзапасы", "Продано", "Зарезерви\nровано", "SG", "good_cod"], axis=1,
+                ["Reason code", "Физические \nзапасы", "Продано", "Зарезерви\nровано", 'Артикул'], axis=1,
                 inplace=True)
 
             name_dir_min = '{}\{}'.format(self.current_dir, 'Мин.витрина')
@@ -120,19 +119,38 @@ def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
                 try:
                     temp_df = df_min_vitrina[(df_min_vitrina.ТГ == group)]
                     if len(temp_df) != 0:
+
                         data = {
+                            'Описание товара, Удалить перед импортом': [],
                             'Номенклатура': [],
-                            'Описание товара': [],
-                            'ТГ': [],
-                            'НГ': [],
-                            'Кол - во': [],
-                            'С \nячейки': [],
+                            'Кол-во': [],
+                            'Со склада': [],
+                            'С ячейки': [],
+                            'На БЮ': [],
+                            'На склад': [],
+                            'Дата отгрузки': [],
+                            'Промо': [],
+                            'С "reason code"': [],
+                            'На "reason code"': [],
+                            'С профиля учета': [],
+                            'На профиль учета': [],
+                            'В ячейку': [],
+                            'С сайта': [],
+                            'На сайт': [],
+                            'С владельца': [],
+                            'На владельца': [],
+                            'Из партии': [],
+                            'В партию': [],
+                            'Из ГТД': [],
+                            'В ГТД': [],
+                            'С серийного номера': [],
+                            'На серийный номер': []
                         }
 
                         temp_df.sort_values(by='Код \nноменклатуры'). \
-                            to_excel(writer, sheet_name='Ед. ТГ {}'.format(group), index=False, na_rep='')
-                        worksheet = writer.sheets['Ед. ТГ {}'.format(group)]
-                        set_column(temp_df, worksheet)
+                            to_excel(writer, sheet_name='Min. ТГ {}'.format(group), index=False, na_rep='')
+                        worksheet = writer.sheets['Min. ТГ {}'.format(group)]
+                        set_column_min(temp_df, worksheet)
 
                         temp_dict = (temp_df
                                      .groupby("Код \nноменклатуры")
@@ -142,23 +160,38 @@ def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
                             art_df_sklad = sklad_tdd[(sklad_tdd['Код \nноменклатуры'] == int(key))]
                             for i, row in art_df_sklad.iterrows():
                                 if value[0]['Разница'] < 0:
+                                    data['Описание товара, Удалить перед импортом'].append(row['Описание товара'])
+
                                     data['Номенклатура'].append(row['Код \nноменклатуры'])
-                                    data['С \nячейки'].append(row['Местоположение'])
-                                    data['Описание товара'].append(row['Описание товара'])
-                                    data['ТГ'].append(row['ТГ'])
-                                    data['НГ'].append(row['НГ'])
+                                    data['Со склада'].append('012_825')
+                                    data['С ячейки'].append(row['Местоположение'])
+                                    data['На БЮ'].append('825')
+                                    data['На склад'].append('V_825')
+                                    data['Дата отгрузки'].append('')
+                                    data['Промо'].append('')
+                                    data['С "reason code"'].append('')
+                                    data['На "reason code"'].append('')
+                                    data['С профиля учета'].append('')
+                                    data['На профиль учета'].append('')
+                                    data['В ячейку'].append('V-sales_825')
+                                    data['С сайта'].append('')
+                                    data['На сайт'].append('')
+                                    data['С владельца'].append('')
+                                    data['На владельца'].append('')
+                                    data['Из партии'].append('')
+                                    data['В партию'].append('')
+                                    data['Из ГТД'].append('')
+                                    data['В ГТД'].append('')
+                                    data['С серийного номера'].append('')
+                                    data['На серийный номер'].append('')
                                     if row['Доступно'] < -(value[0]['Разница']):
-                                        data['Кол - во'].append(row['Доступно'])
+                                        data['Кол-во'].append(row['Доступно'])
                                         value[0]['Разница'] += row['Доступно']
                                     else:
-                                        data['Кол - во'].append(-(value[0]['Разница']))
+                                        data['Кол-во'].append(-(value[0]['Разница']))
                                         break
                         temp_df_pst = pd.DataFrame(data=data)
-                        temp_df_pst.insert(6, "Со \nСклада", '012_825')
-                        temp_df_pst.insert(7, "БЮ", '825')
-                        temp_df_pst.insert(8, "На \nсклад", 'V_825')
-                        temp_df_pst.insert(9, "В \nЯчейку", 'V_Sales')
-                        temp_df_pst['Со \nСклада'] = temp_df_pst['Со \nСклада'].astype('string')
+                        temp_df_pst['Со склада'] = temp_df_pst['Со склада'].astype('string')
                         temp_df_pst_n = temp_df_pst.convert_dtypes()
 
                         writer_pst = pd.ExcelWriter(f'Файлы для импорта/Пст ТГ.{group}.xlsx', engine='xlsxwriter')
@@ -168,9 +201,8 @@ def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
                         writer_pst.close()
 
                 except Exception as ex:
-                    QMessageBox.critical(self, 'Ошибка!', f'{ex}')
+                    QMessageBox.critical(self, 'Ошибка!', f'Формирования файлов пст\n{ex}')
                     self.restart1()
-
             writer.close()
         except Exception as ex:
             QMessageBox.critical(self, 'Ошибка!', 'Ошибка записи результата мин.витрина{}'.format(ex))
@@ -349,11 +381,24 @@ def set_column(df, worksheet, cell_format=None):
     worksheet.set_column('M:W', 14, cell_format)
 
 
+def set_column_min(df, worksheet, cell_format=None):
+    (max_row, max_col) = df.shape
+    worksheet.autofilter(0, 0, max_row, max_col - 1)
+    worksheet.set_column('A:A', 5, cell_format)
+    worksheet.set_column('B:B', 10, cell_format)
+    worksheet.set_column('C:D', 20, cell_format)
+    worksheet.set_column('E:E', 23, cell_format)
+    worksheet.set_column('F:F', 60, cell_format)
+    worksheet.set_column('G:H', 10, cell_format)
+    worksheet.set_column('I:I', 15, cell_format)
+    worksheet.set_column('J:K', 20, cell_format)
+    worksheet.set_column('L:L', 17, cell_format)
+
+
 def set_column_pst(df, worksheet, cell_format=None):
     (max_row, max_col) = df.shape
     worksheet.autofilter(0, 0, max_row, max_col - 1)
-    worksheet.set_column('A:A', 17, cell_format)
-    worksheet.set_column('B:B', 50, cell_format)
-    worksheet.set_column('C:E', 12, cell_format)
-    worksheet.set_column('F:F', 22, cell_format)
-    worksheet.set_column('D:W', 16, cell_format)
+    worksheet.set_column('A:A', 65, cell_format)
+    worksheet.set_column('B:B', 17, cell_format)
+    worksheet.set_column('C:G', 17, cell_format)
+    worksheet.set_column('H:X', 15, cell_format)
