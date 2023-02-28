@@ -16,6 +16,7 @@ class Ui_MainWindow(object):
         MainWindow.setEnabled(True)
         MainWindow.setFixedSize(450, 431)
         MainWindow.setWindowIcon(QtGui.QIcon("images/icons/favicon.ico"))
+
         self.centralwidget = QtWidgets.QWidget(MainWindow)
         self.centralwidget.setObjectName("centralwidget")
         self.label = QtWidgets.QLabel(self.centralwidget)
