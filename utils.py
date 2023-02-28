@@ -96,7 +96,13 @@ def check_stock(self, file_path, min_vitrina=False, plus=False, minus=False,
             df_min_vitrina = pd.merge(df_min_vitrina, daily_sales, left_on='Код \nноменклатуры',
                                       right_on='Код \nноменклатуры')
             df_min_vitrina = df_min_vitrina.assign(Разница=df_min_vitrina['Доступно'] - df_min_vitrina['Количество мин'])
-            df_min_vitrina = df_min_vitrina[(df_min_vitrina['Разница'] < 0)]
+            df_min_vitrina = df_min_vitrina[(df_min_vitrina['Разница'] < 0) &
+                                            ((df_min_vitrina['Доступно']/df_min_vitrina['Количество мин']*100) < 60)
+            ]
+            writer = pd.ExcelWriter('temp.xlsx', engine='xlsxwriter')
+            df_min_vitrina.to_excel(writer, sheet_name='ooo', index=False, na_rep='')
+            writer.close()
+
             df_min_vitrina.drop(
                 ["Reason code", "Физические \nзапасы", "Продано", "Зарезерви\nровано", 'Артикул'], axis=1,
                 inplace=True)
